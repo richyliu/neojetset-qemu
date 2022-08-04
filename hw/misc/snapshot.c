@@ -41,7 +41,7 @@ static void save_snapshot(struct SnapshotState *s) {
     size_t guest_size = current_machine->ram->ram_block->max_length;
 
     fd = open(filepath, O_RDWR | O_CREAT | O_TRUNC, (mode_t)0600);
-    if (!ftruncate(fd, guest_size)) {
+    if (ftruncate(fd, guest_size)) {
         fprintf(stderr, "Failed to expand file to %zu bytes\n", guest_size);
         close(fd);
         s->is_saved = false;
