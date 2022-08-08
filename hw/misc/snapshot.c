@@ -26,66 +26,6 @@ struct SnapshotState {
     QIOChannelBuffer *ioc;
 };
 
-// memory save location (for better performance, use tmpfs)
-const char *filepath = "/Volumes/RAMDisk/snapshot_0";
-
-static void save_snapshot(struct SnapshotState *s) {
-    if (s->is_saved) {
-        return;
-    }
-    s->is_saved = true;
-
-    // save memory state to file
-    int fd = -1;
-    uint8_t *guest_mem = current_machine->ram->ram_block->host;
-    size_t guest_size = current_machine->ram->ram_block->max_length;
-
-    fd = open(filepath, O_RDWR | O_CREAT | O_TRUNC, (mode_t)0600);
-    if (ftruncate(fd, guest_size)) {
-        fprintf(stderr, "Failed to expand file to %zu bytes\n", guest_size);
-        close(fd);
-        s->is_saved = false;
-        return;
-    }
-
-    char *map = mmap(0, guest_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    memcpy(map, guest_mem, guest_size);
-    msync(map, guest_size, MS_SYNC);
-    munmap(map, guest_size);
-    close(fd);
-
-    // unmap the guest, we will now use a MAP_PRIVATE
-    munmap(guest_mem, guest_size);
-
-    // map as MAP_PRIVATE to avoid carrying writes back to the saved file
-    fd = open(filepath, O_RDONLY);
-    mmap(guest_mem, guest_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, fd, 0);
-
-    // save cpu and device state
-    s->ioc = qemu_snapshot_save_cpu_state();
-}
-
-static void restore_snapshot(struct SnapshotState *s) {
-    int fd = -1;
-    uint8_t *guest_mem = current_machine->ram->ram_block->host;
-    size_t guest_size = current_machine->ram->ram_block->max_length;
-
-    if (!s->is_saved) {
-        fprintf(stderr, "[QEMU] ERROR: attempting to restore but state has not been saved!\n");
-        return;
-    }
-
-    munmap(guest_mem, guest_size);
-
-    // remap the snapshot at the same location
-    fd = open(filepath, O_RDONLY);
-    mmap(guest_mem, guest_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, fd, 0);
-    close(fd);
-
-    // restore cpu and device state
-    qemu_snapshot_load_cpu_state(s->ioc);
-}
-
 static uint64_t snapshot_mmio_read(void *opaque, hwaddr addr, unsigned size)
 {
     return 0;
@@ -100,12 +40,6 @@ static void snapshot_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     switch (addr) {
     case 0x00:
         switch (val) {
-        case 0x101:
-            save_snapshot(snapshot);
-            break;
-        case 0x102:
-            restore_snapshot(snapshot);
-            break;
         }
         break;
     }

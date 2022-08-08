@@ -50,6 +50,7 @@
 #include "sysemu/cpus.h"
 #include "exec/memory.h"
 #include "exec/target_page.h"
+#include "exec/ramblock.h"
 #include "trace.h"
 #include "qemu/iov.h"
 #include "qemu/main-loop.h"
@@ -3310,27 +3311,59 @@ void qmp_snapshot_delete(const char *job_id,
     job_start(&s->common);
 }
 
-// saves the cpu and devices state
-QIOChannelBuffer* qemu_snapshot_save_cpu_state(void)
+
+static QIOChannelBuffer *ioc_save = NULL;
+
+void qmp_fast_snapshot_save(const char* filename, Error **errp)
 {
+    if (ioc_save) {
+        fprintf(stderr, "Fast snapshot already in progress\n");
+        return;
+    }
+
+    // save memory state to file
+    int fd = -1;
+    uint8_t *guest_mem = current_machine->ram->ram_block->host;
+    size_t guest_size = current_machine->ram->ram_block->max_length;
+
+    fd = open(filename, O_RDWR | O_CREAT | O_TRUNC, (mode_t)0600);
+    if (ftruncate(fd, guest_size)) {
+        fprintf(stderr, "Failed to expand file to %zu bytes\n", guest_size);
+        close(fd);
+        ioc_save = NULL;
+        return;
+    }
+
+    char *map = mmap(0, guest_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    memcpy(map, guest_mem, guest_size);
+    msync(map, guest_size, MS_SYNC);
+    munmap(map, guest_size);
+    close(fd);
+
+    // unmap the guest, we will now use a MAP_PRIVATE
+    munmap(guest_mem, guest_size);
+
+    // map as MAP_PRIVATE to avoid carrying writes back to the saved file
+    fd = open(filename, O_RDONLY);
+    mmap(guest_mem, guest_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, fd, 0);
+
     QEMUFile *f;
-    QIOChannelBuffer *ioc;
     MigrationState *ms = migrate_get_current();
     int ret;
 
     /* This is a hack to trick vm_stop() into thinking it is not in vcpu thread.
      * This is needed to properly stop the VM for a snapshot.
      */
-    CPUState *cpu = current_cpu;
-    current_cpu = NULL;
+    /* CPUState *cpu = current_cpu; */
+    /* current_cpu = NULL; */
     vm_stop(RUN_STATE_SAVE_VM);
-    current_cpu = cpu;
+    /* current_cpu = cpu; */
 
     global_state_store_running();
 
-    ioc = qio_channel_buffer_new(0x10000);
-    qio_channel_set_name(QIO_CHANNEL(ioc), "snapshot-buffer");
-    f = qemu_file_new_output(QIO_CHANNEL(ioc));
+    ioc_save = qio_channel_buffer_new(0x10000);
+    qio_channel_set_name(QIO_CHANNEL(ioc_save), "snapshot-buffer");
+    f = qemu_file_new_output(QIO_CHANNEL(ioc_save));
 
     /* We need to initialize migration otherwise qemu_save_device_state() will
      * complain.
@@ -3356,8 +3389,6 @@ QIOChannelBuffer* qemu_snapshot_save_cpu_state(void)
      * qemu-system-x86_64: Expected vmdescription section, but got 0
      */
     ms->state = MIGRATION_STATUS_POSTCOPY_ACTIVE;
-
-    return ioc;
 }
 
 // loads the cpu and devices state
@@ -3387,9 +3418,26 @@ static void do_snapshot_load(void* opaque) {
     fprintf(stderr, "loaded snapshot at %ld.%ld\n", ts.tv_sec, ts.tv_nsec);
 }
 
-void qemu_snapshot_load_cpu_state(QIOChannelBuffer *ioc) {
+void qmp_fast_snapshot_load(const char* filename, Error **errp)
+{
+    int fd = -1;
+    uint8_t *guest_mem = current_machine->ram->ram_block->host;
+    size_t guest_size = current_machine->ram->ram_block->max_length;
+
+    if (!ioc_save) {
+        fprintf(stderr, "[QEMU] ERROR: attempting to restore but state has not been saved!\n");
+        return;
+    }
+
+    munmap(guest_mem, guest_size);
+
+    // remap the snapshot at the same location
+    fd = open(filename, O_RDONLY);
+    mmap(guest_mem, guest_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, fd, 0);
+    close(fd);
+
     /* Run in a bh because otherwise qemu_loadvm_state won't work
      */
-    QEMUBH *bh = qemu_bh_new(do_snapshot_load, ioc);
+    QEMUBH *bh = qemu_bh_new(do_snapshot_load, ioc_save);
     qemu_bh_schedule(bh);
 }

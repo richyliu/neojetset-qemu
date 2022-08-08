@@ -2130,3 +2130,14 @@
   'data': { 'job-id': 'str',
             'tag': 'str',
             'devices': ['str'] } }
+
+
+##
+# @fast-snapshot-save:
+##
+{ 'command': 'fast-snapshot-save', 'data': {'filename': 'str'} }
+
+##
+# @fast-snapshot-load:
+##
+{ 'command': 'fast-snapshot-load', 'data': {'filename': 'str'} }
