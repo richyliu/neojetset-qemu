@@ -40,7 +40,6 @@ const char *shared_mem_file = "/dev/shm/snapshot_data";
 // restore shared memory to previous memory state
 static void snapshot_mem_restore_shared(struct SnapshotState *s) {
     if (s->shared_addr != -1 && s->saved_shared != NULL) {
-        printf("removing shared memory at %p\n", (void*)s->guest_mem + s->shared_addr);
         // remove the shared memory
         munmap(s->guest_mem + s->shared_addr, s->shared_size);
         // restore what was previously at the shared memory
@@ -66,13 +65,10 @@ static void snapshot_mem_init_shared(struct SnapshotState *s) {
             perror("shared memory file expand to page size");
             exit(1);
         }
-        printf("fd: %d\n", fd);
-        printf("shared memory mapped at %p\n", s->guest_mem + s->shared_addr);
         // copy backup
         s->saved_shared = mmap(NULL, s->shared_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         memcpy(s->saved_shared, s->guest_mem + s->shared_addr, s->shared_size);
         munmap(s->guest_mem + s->shared_addr, s->shared_size);
-        puts("shared memory munmap");
         mmap(s->guest_mem + s->shared_addr, s->shared_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
 
         close(fd);
@@ -155,18 +151,11 @@ static void snapshot_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     snapshot->guest_mem = current_machine->ram->ram_block->host;
     snapshot->guest_size = current_machine->ram->ram_block->max_length;
 
-    fprintf(stderr, "[QEMU] snapshot_mmio_write: addr=0x%lx, val=0x%lx, size=%u\n", addr, val, size);
+    /* fprintf(stderr, "[QEMU] snapshot_mmio_write: addr=0x%lx, val=0x%lx, size=%u\n", addr, val, size); */
 
     switch (addr) {
     case 0x00:
         switch (val) {
-            case 0x201:
-                // trigger msync
-                if (snapshot->shared_addr != -1) {
-                    printf("msync at %p\n", snapshot->guest_mem + snapshot->shared_addr);
-                    msync(snapshot->guest_mem + snapshot->shared_addr, snapshot->shared_size, MS_SYNC);
-                }
-                break;
             case 0x202:
                 // release shared memory
                 snapshot_mem_restore_shared(snapshot);
@@ -180,10 +169,10 @@ static void snapshot_mmio_write(void *opaque, hwaddr addr, uint64_t val,
         }
         break;
     case 0x10:
-        // link address to shared memory
-        fprintf(stderr, "VM physical address: 0x%zx\n", val);
         // release previous shared memory first
         snapshot_mem_restore_shared(snapshot);
+
+        // link address to shared memory
         snapshot->shared_addr = val;
         snapshot->shared_size = 0x1000;
         snapshot_mem_init_shared(snapshot);

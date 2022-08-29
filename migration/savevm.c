@@ -3380,11 +3380,6 @@ static void do_snapshot_load(void* opaque) {
     vm_start();
 
     g_free(f);
-
-    // print time to debug speed
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    fprintf(stderr, "loaded snapshot at %ld.%ld\n", ts.tv_sec, ts.tv_nsec);
 }
 
 void qemu_snapshot_load_cpu_state(QIOChannelBuffer *ioc) {
