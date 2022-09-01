@@ -3378,6 +3378,7 @@ static void do_snapshot_load(void* opaque) {
     }
 
     vm_start();
+    resume_all_vcpus();
 
     g_free(f);
 }
@@ -3386,5 +3387,6 @@ void qemu_snapshot_load_cpu_state(QIOChannelBuffer *ioc) {
     /* Run in a bh because otherwise qemu_loadvm_state won't work
      */
     QEMUBH *bh = qemu_bh_new(do_snapshot_load, ioc);
+    pause_all_vcpus();
     qemu_bh_schedule(bh);
 }

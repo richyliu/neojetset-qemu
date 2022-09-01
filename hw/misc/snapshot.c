@@ -73,7 +73,9 @@ static void snapshot_mem_init_shared(struct SnapshotState *s) {
 
         close(fd);
     } else {
-        fprintf(stderr, "shared memory address (0x%zx) is out of bounds\n", s->shared_addr);
+        if (s->shared_addr != -1) {
+            fprintf(stderr, "shared memory address (0x%zx) is out of bounds\n", s->shared_addr);
+        }
     }
 }
 
@@ -153,6 +155,17 @@ static void snapshot_mmio_write(void *opaque, hwaddr addr, uint64_t val,
 
     /* fprintf(stderr, "[QEMU] snapshot_mmio_write: addr=0x%lx, val=0x%lx, size=%u\n", addr, val, size); */
 
+#define ALPHA 0.1
+    struct timeval tv;
+    static int counter = 0;
+    static double prev = 0;
+    static double avg = 0; // exponential rolling average
+    double cur;
+    if (prev == 0) {
+        gettimeofday(&tv, NULL);
+        prev = tv.tv_sec + tv.tv_usec / 1000000.0;
+    }
+
     switch (addr) {
     case 0x00:
         switch (val) {
@@ -164,6 +177,16 @@ static void snapshot_mmio_write(void *opaque, hwaddr addr, uint64_t val,
                 save_snapshot(snapshot);
                 break;
             case 0x102:
+                // log current time
+                counter++;
+                gettimeofday(&tv, NULL);
+                cur = tv.tv_sec + tv.tv_usec / 1000000.0;
+                avg = (cur - prev) * ALPHA + (1 - ALPHA) * avg;
+                if (counter % 10 == 0) {
+                    fprintf(stderr, "[QEMU] counter: %5d, average iters/sec: %f\n", counter, 1.0 / avg);
+                }
+                prev = cur;
+
                 restore_snapshot(snapshot);
                 break;
         }
