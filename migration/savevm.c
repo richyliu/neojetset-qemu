@@ -3318,13 +3318,8 @@ QIOChannelBuffer* qemu_snapshot_save_cpu_state(void)
     MigrationState *ms = migrate_get_current();
     int ret;
 
-    /* This is a hack to trick vm_stop() into thinking it is not in vcpu thread.
-     * This is needed to properly stop the VM for a snapshot.
-     */
-    CPUState *cpu = current_cpu;
-    current_cpu = NULL;
+    pause_all_vcpus();
     vm_stop(RUN_STATE_SAVE_VM);
-    current_cpu = cpu;
 
     global_state_store_running();
 
@@ -3351,6 +3346,7 @@ QIOChannelBuffer* qemu_snapshot_save_cpu_state(void)
     g_free(f);
 
     vm_start();
+    resume_all_vcpus();
 
     /* Needed so qemu_loadvm_state does not error with:
      * qemu-system-x86_64: Expected vmdescription section, but got 0
