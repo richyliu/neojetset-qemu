@@ -3310,14 +3310,18 @@ void qmp_snapshot_delete(const char *job_id,
     job_start(&s->common);
 }
 
-// saves the cpu and devices state
-QIOChannelBuffer* qemu_snapshot_save_cpu_state(void)
+/*
+ * Take a snapshot and save everything but the RAM (cpu and virtual devices) to
+ * a QIOBuffer for later restore.
+ */
+QIOChannelBuffer* snapshot_save_nonmemory(void)
 {
     QEMUFile *f;
     QIOChannelBuffer *ioc;
     MigrationState *ms = migrate_get_current();
     int ret;
 
+    /* Pause CPUs to avoid state inconsistencies when saving */
     pause_all_vcpus();
     vm_stop(RUN_STATE_SAVE_VM);
 
@@ -3338,10 +3342,9 @@ QIOChannelBuffer* qemu_snapshot_save_cpu_state(void)
 
     ret = qemu_save_device_state(f);
     if (ret < 0) {
-        fprintf(stderr, "[QEMU] save device err: %d\n", ret);
+        error_report("Failed to save device state: %d", ret);
     }
 
-    // clean up and restart vm
     qemu_fflush(f);
     g_free(f);
 
@@ -3356,7 +3359,9 @@ QIOChannelBuffer* qemu_snapshot_save_cpu_state(void)
     return ioc;
 }
 
-// loads the cpu and devices state
+/*
+ * Does the actual work for loading a snapshot. Ran inside a bottom half.
+ */
 static void do_snapshot_load(void* opaque) {
     QIOChannelBuffer *ioc = opaque;
     QEMUFile *f;
@@ -3364,13 +3369,12 @@ static void do_snapshot_load(void* opaque) {
 
     vm_stop(RUN_STATE_RESTORE_VM);
 
-    // seek back to beginning of file
     qio_channel_io_seek(QIO_CHANNEL(ioc), 0, 0, NULL);
     f = qemu_file_new_input(QIO_CHANNEL(ioc));
 
     ret = qemu_loadvm_state(f);
     if (ret < 0) {
-        fprintf(stderr, "[QEMU] loadvm err: %d\n", ret);
+        error_report("Failed to load device state: %d", ret);
     }
 
     vm_start();
@@ -3379,9 +3383,12 @@ static void do_snapshot_load(void* opaque) {
     g_free(f);
 }
 
-void qemu_snapshot_load_cpu_state(QIOChannelBuffer *ioc) {
-    /* Run in a bh because otherwise qemu_loadvm_state won't work
-     */
+/*
+ * Loads the cpu and virtual device portion of the snapshot. Pass in the
+ * QIOChannelBuffer from snapshot_save_nonmemory().
+ */
+void snapshot_load_nonmemory(QIOChannelBuffer *ioc) {
+    /* Run in a bh because otherwise qemu_loadvm_state won't work */
     QEMUBH *bh = qemu_bh_new(do_snapshot_load, ioc);
     pause_all_vcpus();
     qemu_bh_schedule(bh);

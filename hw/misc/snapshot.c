@@ -18,31 +18,24 @@ DECLARE_INSTANCE_CHECKER(SnapshotState, SNAPSHOT,
 struct SnapshotState {
     PCIDevice pdev;
     MemoryRegion mmio;
-
-    // track saved stated to prevent re-saving
-    bool is_saved;
-
-    uintptr_t shared_addr; // sync to shared memory file
-    size_t shared_size;
-    uint8_t *saved_shared; // saved memory previously at shared_addr
-
-    uint8_t *guest_mem;
-    size_t guest_size;
-
-    // saved cpu and devices state
-    QIOChannelBuffer *ioc;
+    bool is_saved;         /* track saved stated to prevent re-saving */
+    uintptr_t shared_addr; /* location of guest page for shared memory */
+    size_t shared_size;    /* size of shared memory */
+    uint8_t *saved_shared; /* memory previously stored at shared page */
+    uint8_t *guest_mem;    /* entire guest memory */
+    size_t guest_size;     /* size of guest memory */
+    QIOChannelBuffer *ioc; /* saved cpu and devices state */
 };
 
-// memory save location (for better performance, use tmpfs)
+/* where to store the memory snapshot (for better performance, use tmpfs) */
 const char *filepath = "/dev/shm/snapshot0";
+/* shared memory file to communicate with fuzzer */
 const char *shared_mem_file = "/dev/shm/snapshot_data";
 
-// restore shared memory to previous memory state
+/* Remove shared memory and restore to original VM memory page */
 static void snapshot_mem_restore_shared(struct SnapshotState *s) {
     if (s->shared_addr != -1 && s->saved_shared != NULL) {
-        // remove the shared memory
         munmap(s->guest_mem + s->shared_addr, s->shared_size);
-        // restore what was previously at the shared memory
         mremap(s->saved_shared, s->shared_size, s->shared_size,
                MREMAP_MAYMOVE | MREMAP_FIXED, s->guest_mem + s->shared_addr);
         s->shared_addr = -1;
@@ -50,12 +43,13 @@ static void snapshot_mem_restore_shared(struct SnapshotState *s) {
     }
 }
 
-// overwrite map with shared memory
+/* Initialized shared memory between QEMU guest and external process */
 static void snapshot_mem_init_shared(struct SnapshotState *s) {
     int fd = -1;
     size_t page_size = 0x1000;
 
-    if (s->shared_addr != -1 && s->shared_addr < s->guest_size && (s->shared_addr & (page_size - 1)) == 0) {
+    if (s->shared_addr != -1 && s->shared_addr < s->guest_size &&
+        (s->shared_addr & (page_size - 1)) == 0) {
         fd = open(shared_mem_file, O_RDWR | O_CREAT | O_SYNC, 0666);
         if (fd < 0) {
             perror("shared memory file open");
@@ -65,35 +59,33 @@ static void snapshot_mem_init_shared(struct SnapshotState *s) {
             perror("shared memory file expand to page size");
             exit(1);
         }
-        // copy backup
-        s->saved_shared = mmap(NULL, s->shared_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        /* save a backup of the original memory stored at the location for later
+         * restoring
+         */
+        s->saved_shared = mmap(NULL, s->shared_size, PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         memcpy(s->saved_shared, s->guest_mem + s->shared_addr, s->shared_size);
         munmap(s->guest_mem + s->shared_addr, s->shared_size);
-        mmap(s->guest_mem + s->shared_addr, s->shared_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
-
+        mmap(s->guest_mem + s->shared_addr, s->shared_size,
+             PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
         close(fd);
-    } else {
-        if (s->shared_addr != -1) {
-            fprintf(stderr, "shared memory address (0x%zx) is out of bounds\n", s->shared_addr);
-        }
     }
 }
 
-// restore memory from file
+/* Restore guest memory by using a private COW (copy-on-write) memory mapping */
 static void snapshot_mem_restore(struct SnapshotState *s) {
     int fd = -1;
 
-    // remove the shared mem backup
+    /* free page for storing original page of shared memory mapping */
     munmap(s->saved_shared, s->shared_size);
     s->saved_shared = NULL;
     munmap(s->guest_mem + s->shared_addr, s->shared_size);
 
-    // remove the entire old memory
     munmap(s->guest_mem, s->guest_size);
 
-    // map as MAP_PRIVATE to avoid carrying writes back to the saved file
     fd = open(filepath, O_RDONLY);
-    mmap(s->guest_mem, s->guest_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, fd, 0);
+    mmap(s->guest_mem, s->guest_size, PROT_READ | PROT_WRITE,
+         MAP_PRIVATE | MAP_FIXED, fd, 0);
     close(fd);
 
     snapshot_mem_init_shared(s);
@@ -105,39 +97,42 @@ static void save_snapshot(struct SnapshotState *s) {
     }
     s->is_saved = true;
 
-    // save memory state to file
     int fd = -1;
 
     fd = open(filepath, O_RDWR | O_CREAT | O_TRUNC, (mode_t)0600);
     if (ftruncate(fd, s->guest_size)) {
-        fprintf(stderr, "Failed to expand file to %zu bytes\n", s->guest_size);
+        perror("Failed to expand file to guest memory size");
         close(fd);
         s->is_saved = false;
         return;
     }
 
-    char *map = mmap(0, s->guest_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    char *map = mmap(0, s->guest_size, PROT_READ | PROT_WRITE,
+                     MAP_SHARED, fd, 0);
     memcpy(map, s->guest_mem, s->guest_size);
     msync(map, s->guest_size, MS_SYNC);
     munmap(map, s->guest_size);
     close(fd);
 
+    /* load the memory again with COW to avoid carrying writes back to the
+     * snapshot file
+     */
     snapshot_mem_restore(s);
 
-    // save cpu and device state
-    s->ioc = qemu_snapshot_save_cpu_state();
+    s->ioc = snapshot_save_nonmemory();
+    if (s->ioc == NULL) {
+        s->is_saved = false;
+    }
 }
 
 static void restore_snapshot(struct SnapshotState *s) {
     if (!s->is_saved) {
-        fprintf(stderr, "[QEMU] ERROR: attempting to restore but state has not been saved!\n");
         return;
     }
 
     snapshot_mem_restore(s);
 
-    // restore cpu and device state
-    qemu_snapshot_load_cpu_state(s->ioc);
+    snapshot_load_nonmemory(s->ioc);
 }
 
 static uint64_t snapshot_mmio_read(void *opaque, hwaddr addr, unsigned size)
@@ -145,6 +140,13 @@ static uint64_t snapshot_mmio_read(void *opaque, hwaddr addr, unsigned size)
     return 0;
 }
 
+/* We have different operations based on the value written to the 0th uint32.
+ * Writing 0x101 saves a snapshot, 0x102 restores the snapshot, and 0x202 restores
+ * the shared memory region.
+ *
+ * Writing to address 0x10 with a 64-bit value sets the shared memory region to
+ * the given address.
+ */
 static void snapshot_mmio_write(void *opaque, hwaddr addr, uint64_t val,
                 unsigned size)
 {
@@ -153,49 +155,25 @@ static void snapshot_mmio_write(void *opaque, hwaddr addr, uint64_t val,
     snapshot->guest_mem = current_machine->ram->ram_block->host;
     snapshot->guest_size = current_machine->ram->ram_block->max_length;
 
-    /* fprintf(stderr, "[QEMU] snapshot_mmio_write: addr=0x%lx, val=0x%lx, size=%u\n", addr, val, size); */
-
-#define ALPHA 0.1
-    struct timeval tv;
-    static int counter = 0;
-    static double prev = 0;
-    static double avg = 0; // exponential rolling average
-    double cur;
-    if (prev == 0) {
-        gettimeofday(&tv, NULL);
-        prev = tv.tv_sec + tv.tv_usec / 1000000.0;
-    }
-
     switch (addr) {
     case 0x00:
         switch (val) {
             case 0x202:
-                // release shared memory
                 snapshot_mem_restore_shared(snapshot);
                 break;
             case 0x101:
                 save_snapshot(snapshot);
                 break;
             case 0x102:
-                // log current time
-                counter++;
-                gettimeofday(&tv, NULL);
-                cur = tv.tv_sec + tv.tv_usec / 1000000.0;
-                avg = (cur - prev) * ALPHA + (1 - ALPHA) * avg;
-                if (counter % 10 == 0) {
-                    fprintf(stderr, "[QEMU] counter: %5d, average iters/sec: %f\n", counter, 1.0 / avg);
-                }
-                prev = cur;
-
                 restore_snapshot(snapshot);
                 break;
         }
         break;
     case 0x10:
-        // release previous shared memory first
+        /* release previously stored shared memory page first */
         snapshot_mem_restore_shared(snapshot);
 
-        // link address to shared memory
+        /* link address to shared memory */
         snapshot->shared_addr = val;
         snapshot->shared_size = 0x1000;
         snapshot_mem_init_shared(snapshot);

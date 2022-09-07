@@ -11,16 +11,9 @@ commands supported that can be called by the guest:
 - snapshot: save a copy of the guest VM memory, registers, and virtual
   device state
 - restore: restore the saved copy of guest VM state
-- coverage_location: given a location in guest memory, specifying
-  where the coverage data is to be passed to the fuzzer
-- input_location: specify where in the guest memory the fuzzing input
-  should be stored
-- done: indicates whether or not the run succeeded and that the
-  coverage data has been populated
+- shared_memory: request a page of guest memory to be "linked" to shared memory
+  on the host, which can then communicate to a fuzzer on the host
 
-The first version of the virtual device will only accept snapshot and
-restore commands from the guest. Coverage data will be collected by
-code on the guest with source-based coverage tracking.
-
-Further expansions could include controlling the snapshot/restore from
-host and gathering code coverage information directly from TCG.
+Coverage data will be collected by code on the guest with source-based coverage
+tracking. Another process on the host will control the fuzzing through the
+shared memory.
